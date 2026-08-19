@@ -50,8 +50,14 @@ pub(crate) fn parse_xml_with_limits(
     inner_decryptor: &mut dyn Cipher,
     limits: DatabaseOpenLimits,
 ) -> Result<crate::db::Database, ParseXmlError> {
-    let kdbx: KeePassFile = quick_xml::de::from_reader(data)?;
-    kdbx.xml_to_db(inner_decryptor, header_attachments, limits)
+    let mut deserializer = quick_xml::de::Deserializer::from_reader(data);
+    let mut ignored_xml_paths = Vec::new();
+    let kdbx: KeePassFile = serde_ignored::deserialize(&mut deserializer, |path| {
+        ignored_xml_paths.push(path.to_string());
+    })?;
+    let mut db = kdbx.xml_to_db(inner_decryptor, header_attachments, limits)?;
+    db.ignored_xml_paths = ignored_xml_paths;
+    Ok(db)
 }
 
 /// Errors that can occur during parsing of the inner XML database of a KDBX file
@@ -467,6 +473,28 @@ mod tests {
 
         assert!(serialized.contains("<DeletionTime>"));
         assert!(!serialized.contains("<deletion_time>"));
+    }
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "PascalCase")]
+    struct IgnoredFieldProbe {
+        known: String,
+    }
+
+    #[test]
+    fn test_quick_xml_reports_ignored_fields_through_serde_ignored() {
+        let xml =
+            "<IgnoredFieldProbe><Known>kept</Known><FortressUnknown>lost</FortressUnknown></IgnoredFieldProbe>";
+        let mut deserializer = quick_xml::de::Deserializer::from_str(xml);
+        let mut ignored = Vec::new();
+
+        let parsed: IgnoredFieldProbe = serde_ignored::deserialize(&mut deserializer, |path| {
+            ignored.push(path.to_string());
+        })
+        .unwrap();
+
+        assert_eq!(parsed.known, "kept");
+        assert!(ignored.iter().any(|path| path.contains("FortressUnknown")));
     }
 
     #[test]

@@ -41,6 +41,7 @@ byteorder = "1"
 flate2 = "1"
 base64 = "0.23"
 serde = { version = "1",  features = ["derive"] }
+serde_ignored = "0.1.14"
 quick-xml = { version = "0.41", features = ["serialize"] }
 hex-literal = "1"
 secrecy = "0.10.3"
