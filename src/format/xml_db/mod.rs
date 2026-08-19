@@ -21,10 +21,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    compression::{Compression, DecompressionError},
     crypt::ciphers::Cipher,
     db::{DatabaseOpenLimits, DatabaseResourceLimitError, GroupId, Value},
     format::xml_db::{
-        custom_serde::cs_opt_string, entry::UnprotectError, group::Group, meta::{BinaryOpenError, Meta}, timestamp::Timestamp,
+        custom_serde::cs_opt_string, entry::UnprotectError, group::Group, meta::{Binary, Meta}, timestamp::Timestamp,
     },
 };
 #[cfg(feature = "save_kdbx4")]
@@ -69,6 +70,54 @@ pub enum ParseXmlError {
     /// A configured resource limit was exceeded while materializing the database.
     #[error(transparent)]
     ResourceLimit(#[from] DatabaseResourceLimitError),
+}
+
+#[derive(Debug, Error)]
+enum BinaryOpenError {
+    #[error(transparent)]
+    Unprotect(#[from] UnprotectError),
+
+    #[error("decoded/decompressed binary exceeds configured limit")]
+    OutputLimitExceeded,
+}
+
+fn decode_binary_with_limit(
+    binary: Binary,
+    inner_decryptor: &mut dyn Cipher,
+    max_output_bytes: usize,
+) -> Result<Value<Vec<u8>>, BinaryOpenError> {
+    let mut data = base64_engine::STANDARD
+        .decode(binary.value)
+        .map_err(UnprotectError::from)?;
+    let protected = binary.protected.unwrap_or(false);
+
+    if protected {
+        data = inner_decryptor
+            .decrypt(&data)
+            .map_err(UnprotectError::from)?;
+    }
+
+    if binary.compressed.unwrap_or(false) {
+        data = match crate::compression::GZipCompression
+            .decompress_with_limit(&data, max_output_bytes)
+        {
+            Ok(data) => data,
+            Err(DecompressionError::Io(error)) => {
+                return Err(UnprotectError::Io(error).into());
+            }
+            Err(DecompressionError::OutputLimitExceeded { .. }) => {
+                return Err(BinaryOpenError::OutputLimitExceeded);
+            }
+        };
+    } else if data.len() > max_output_bytes {
+        return Err(BinaryOpenError::OutputLimitExceeded);
+    }
+
+    Ok(if protected {
+        Value::protected(data)
+    } else {
+        Value::unprotected(data)
+    })
 }
 
 fn account_binary_size(
@@ -163,20 +212,24 @@ impl KeePassFile {
                     .saturating_sub(total_binary_bytes);
                 let active_limit = limits.max_decompressed_binary_bytes.min(remaining_total);
 
-                let data = match binary.xml_to_db_with_limit(inner_decryptor, active_limit) {
-                    Ok(data) => data,
-                    Err(BinaryOpenError::Unprotect(error)) => return Err(error.into()),
-                    Err(BinaryOpenError::OutputLimitExceeded) => {
-                        let error = if remaining_total < limits.max_decompressed_binary_bytes {
-                            DatabaseResourceLimitError::TotalDecompressedBinaryBytes {
-                                limit: limits.max_total_decompressed_binary_bytes,
-                            }
-                        } else {
-                            DatabaseResourceLimitError::DecompressedBinaryBytes {
-                                limit: limits.max_decompressed_binary_bytes,
-                            }
-                        };
-                        return Err(error.into());
+                let data = if limits == DatabaseOpenLimits::UNLIMITED {
+                    binary.xml_to_db(inner_decryptor)?
+                } else {
+                    match decode_binary_with_limit(binary, inner_decryptor, active_limit) {
+                        Ok(data) => data,
+                        Err(BinaryOpenError::Unprotect(error)) => return Err(error.into()),
+                        Err(BinaryOpenError::OutputLimitExceeded) => {
+                            let error = if remaining_total < limits.max_decompressed_binary_bytes {
+                                DatabaseResourceLimitError::TotalDecompressedBinaryBytes {
+                                    limit: limits.max_total_decompressed_binary_bytes,
+                                }
+                            } else {
+                                DatabaseResourceLimitError::DecompressedBinaryBytes {
+                                    limit: limits.max_decompressed_binary_bytes,
+                                }
+                            };
+                            return Err(error.into());
+                        }
                     }
                 };
 
