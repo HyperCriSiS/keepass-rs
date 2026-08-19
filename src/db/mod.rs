@@ -63,7 +63,7 @@ mod save;
 pub use crate::db::save::DatabaseSaveError;
 
 pub use crate::db::{
-    open::{DatabaseFormatError, DatabaseOpenError},
+    open::{DatabaseFormatError, DatabaseOpenError, DatabaseOpenLimits, DatabaseResourceLimitError},
     types::*,
 };
 
@@ -75,7 +75,10 @@ pub use crate::db::otp::{TOTPAlgorithm, TOTPError, TOTP};
 mod database_tests {
     use std::fs::File;
 
-    use crate::{db::DatabaseOpenError, Database, DatabaseKey};
+    use crate::{
+        db::{DatabaseOpenError, DatabaseOpenLimits, DatabaseResourceLimitError},
+        Database, DatabaseKey,
+    };
 
     #[test]
     fn test_xml() -> Result<(), DatabaseOpenError> {
@@ -102,6 +105,54 @@ mod database_tests {
             DatabaseKey::new().with_password("testing")
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_open_with_input_limit() -> Result<(), std::io::Error> {
+        let mut file = File::open("tests/resources/test_db_with_password.kdbx")?;
+        let limits = DatabaseOpenLimits {
+            max_input_bytes: 1,
+            ..DatabaseOpenLimits::UNLIMITED
+        };
+
+        let error = Database::open_with_limits(
+            &mut file,
+            DatabaseKey::new().with_password("demopass"),
+            limits,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            DatabaseOpenError::ResourceLimit(DatabaseResourceLimitError::InputBytes { limit: 1 })
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_with_decompressed_payload_limit() -> Result<(), std::io::Error> {
+        let data = std::fs::read("tests/resources/test_db_with_password.kdbx")?;
+        let limits = DatabaseOpenLimits {
+            max_decompressed_payload_bytes: 32,
+            ..DatabaseOpenLimits::UNLIMITED
+        };
+
+        let error = Database::parse_with_limits(
+            &data,
+            DatabaseKey::new().with_password("demopass"),
+            limits,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            DatabaseOpenError::ResourceLimit(
+                DatabaseResourceLimitError::DecompressedPayloadBytes { limit: 32 }
+            )
+        ));
+
+        Ok(())
     }
 
     #[cfg(feature = "save_kdbx4")]
