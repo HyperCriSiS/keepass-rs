@@ -3,6 +3,7 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 #[cfg(feature = "save_kdbx4")]
 use flate2::Compression as Flate2Compression;
+use std::convert::TryFrom;
 use std::io::Read;
 #[cfg(feature = "save_kdbx4")]
 use std::io::Write;
