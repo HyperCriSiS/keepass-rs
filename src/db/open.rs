@@ -62,6 +62,40 @@ pub enum DatabaseResourceLimitError {
     TotalDecompressedBinaryBytes { limit: usize },
 }
 
+fn read_to_end_with_limit(
+    source: &mut dyn std::io::Read,
+    max_input_bytes: usize,
+) -> Result<Vec<u8>, DatabaseOpenError> {
+    if max_input_bytes == usize::MAX {
+        let mut data = Vec::new();
+        source.read_to_end(&mut data)?;
+        return Ok(data);
+    }
+
+    let mut data = Vec::with_capacity(max_input_bytes.min(8192));
+    let mut buffer = [0_u8; 8192];
+
+    while data.len() < max_input_bytes {
+        let remaining = max_input_bytes - data.len();
+        let read_len = remaining.min(buffer.len());
+        let bytes_read = source.read(&mut buffer[..read_len])?;
+        if bytes_read == 0 {
+            return Ok(data);
+        }
+        data.extend_from_slice(&buffer[..bytes_read]);
+    }
+
+    let mut probe = [0_u8; 1];
+    if source.read(&mut probe)? != 0 {
+        return Err(DatabaseResourceLimitError::InputBytes {
+            limit: max_input_bytes,
+        }
+        .into());
+    }
+
+    Ok(data)
+}
+
 impl Database {
     /// Parse a database from a std::io::Read.
     pub fn open(source: &mut dyn std::io::Read, key: DatabaseKey) -> Result<Database, DatabaseOpenError> {
@@ -77,20 +111,7 @@ impl Database {
         key: DatabaseKey,
         limits: DatabaseOpenLimits,
     ) -> Result<Database, DatabaseOpenError> {
-        let read_limit = u64::try_from(limits.max_input_bytes)
-            .unwrap_or(u64::MAX)
-            .saturating_add(1);
-        let mut limited = source.take(read_limit);
-        let mut data = Vec::new();
-        limited.read_to_end(&mut data)?;
-
-        if data.len() > limits.max_input_bytes {
-            return Err(DatabaseResourceLimitError::InputBytes {
-                limit: limits.max_input_bytes,
-            }
-            .into());
-        }
-
+        let data = read_to_end_with_limit(source, limits.max_input_bytes)?;
         Database::parse_with_limits(data.as_ref(), key, limits)
     }
 
