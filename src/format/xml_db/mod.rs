@@ -94,38 +94,41 @@ fn decode_binary_with_limit(
 ) -> Result<Value<Vec<u8>>, BinaryOpenError> {
     let mut data = base64_engine::STANDARD
         .decode(binary.value)
-        .map_err(UnprotectError::InvalidBase64)?;
-    if binary.protected.unwrap_or(false) {
-        inner_decryptor.process(&mut data)?;
-        return Ok(Value::Protected(secrecy::SecretBox::new(Box::new(data))));
+        .map_err(UnprotectError::from)?;
+    let protected = binary.protected.unwrap_or(false);
+
+    if protected {
+        data = inner_decryptor
+            .decrypt(&data)
+            .map_err(UnprotectError::from)?;
     }
+
     if binary.compressed.unwrap_or(false) {
-        if max_output_bytes == usize::MAX {
-            return Compression::GZip
-                .decompress(&data)
-                .map(Value::Unprotected)
-                .map_err(|error| match error {
-                    DecompressionError::OutputLimitExceeded => BinaryOpenError::OutputLimitExceeded,
-                    DecompressionError::Io(error) => BinaryOpenError::Unprotect(error.into()),
-                });
-        }
-        return Compression::GZip
+        data = match crate::compression::GZipCompression
             .decompress_with_limit(&data, max_output_bytes)
-            .map(Value::Unprotected)
-            .map_err(|error| match error {
-                DecompressionError::OutputLimitExceeded => BinaryOpenError::OutputLimitExceeded,
-                DecompressionError::Io(error) => BinaryOpenError::Unprotect(error.into()),
-            });
-    }
-    if data.len() > max_output_bytes {
+        {
+            Ok(data) => data,
+            Err(DecompressionError::Io(error)) => {
+                return Err(UnprotectError::Io(error).into());
+            }
+            Err(DecompressionError::OutputLimitExceeded { .. }) => {
+                return Err(BinaryOpenError::OutputLimitExceeded);
+            }
+        };
+    } else if data.len() > max_output_bytes {
         return Err(BinaryOpenError::OutputLimitExceeded);
     }
-    Ok(Value::Unprotected(data))
+
+    Ok(if protected {
+        Value::protected(data)
+    } else {
+        Value::unprotected(data)
+    })
 }
 
 fn account_binary_size(
     size: usize,
-    total: &mut usize,
+    total_binary_bytes: &mut usize,
     limits: DatabaseOpenLimits,
 ) -> Result<(), DatabaseResourceLimitError> {
     if size > limits.max_decompressed_binary_bytes {
@@ -133,22 +136,25 @@ fn account_binary_size(
             limit: limits.max_decompressed_binary_bytes,
         });
     }
-    *total = total
+
+    let new_total = total_binary_bytes
         .checked_add(size)
         .ok_or(DatabaseResourceLimitError::TotalDecompressedBinaryBytes {
             limit: limits.max_total_decompressed_binary_bytes,
         })?;
-    if *total > limits.max_total_decompressed_binary_bytes {
+
+    if new_total > limits.max_total_decompressed_binary_bytes {
         return Err(DatabaseResourceLimitError::TotalDecompressedBinaryBytes {
             limit: limits.max_total_decompressed_binary_bytes,
         });
     }
+
+    *total_binary_bytes = new_total;
     Ok(())
 }
 
-/// Serialize the decrypted database into XML.
 #[cfg(feature = "save_kdbx4")]
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::type_complexity)]
 pub fn to_xml(
     db: &crate::db::Database,
     inner_encryptor: &mut dyn Cipher,
@@ -160,15 +166,15 @@ pub fn to_xml(
 
     let mut attachments: Vec<(usize, Value<Vec<u8>>)> = db
         .attachments
-        .values()
-        .map(|attachment| (attachment.id.get(), attachment.data.clone()))
+        .iter()
+        .map(|(id, attachment)| (id.id(), attachment.data.clone()))
         .collect();
+
     attachments.sort_by_key(|(id, _)| *id);
 
-    Ok((
-        xml,
-        attachments.into_iter().map(|(_, data)| data).collect(),
-    ))
+    let attachments = attachments.into_iter().map(|(_, data)| data).collect();
+
+    Ok((xml, attachments))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -316,10 +322,11 @@ impl KeePassFile {
             }
         }
 
-        // Re-populate Group CustomIcon back-reference sets.
         let group_ids: Vec<crate::db::GroupId> = db.groups.keys().copied().collect();
         for group_id in group_ids {
-            if let Some(crate::db::Icon::Custom(icon_id)) = db.groups.get(&group_id).and_then(|g| g.icon.as_ref()) {
+            if let Some(crate::db::Icon::Custom(icon_id)) =
+                db.groups.get(&group_id).and_then(|g| g.icon.as_ref())
+            {
                 if let Some(icon) = db.custom_icons.get_mut(icon_id) {
                     icon.groups.insert(group_id);
                 }
@@ -331,12 +338,15 @@ impl KeePassFile {
 
     /// Convert from database representation to XML representation.
     #[cfg(feature = "save_kdbx4")]
-    fn db_to_xml(
-        db: &crate::db::Database,
-        inner_encryptor: &mut dyn Cipher,
-    ) -> Result<Self, CryptographyError> {
-        let meta: Meta = (&db.meta).into();
-        let group: Group = Group::db_to_xml(db.root(), inner_encryptor)?;
+    fn db_to_xml(db: &crate::db::Database, inner_cipher: &mut dyn Cipher) -> Result<Self, CryptographyError> {
+        use crate::format::xml_db::meta::Icon;
+
+        let group = Group::db_to_xml(db.root(), inner_cipher)?;
+
+        let mut meta: Meta = db.meta.clone().into();
+        meta.custom_icons.get_or_insert_default().icons =
+            db.custom_icons.values().cloned().map(Icon::from).collect();
+
         let deleted_objects = if db.deleted_objects.is_empty() {
             None
         } else {
@@ -346,7 +356,7 @@ impl KeePassFile {
                     .iter()
                     .map(|(uuid, deletion_time)| DeletedObject {
                         uuid: UUID(*uuid),
-                        deletion_time: deletion_time.map(Timestamp::new_kdbx4),
+                        deletion_time: deletion_time.map(Timestamp::new_iso8601),
                     })
                     .collect(),
             })
@@ -473,7 +483,8 @@ mod tests {
 
     #[test]
     fn test_quick_xml_reports_ignored_fields_through_serde_ignored() {
-        let xml = "<IgnoredFieldProbe><Known>kept</Known><FortressUnknown>lost</FortressUnknown></IgnoredFieldProbe>";
+        let xml =
+            "<IgnoredFieldProbe><Known>kept</Known><FortressUnknown>lost</FortressUnknown></IgnoredFieldProbe>";
         let mut deserializer = quick_xml::de::Deserializer::from_str(xml);
         let mut ignored = Vec::new();
 

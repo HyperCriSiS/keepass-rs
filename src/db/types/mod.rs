@@ -174,68 +174,137 @@ impl Database {
         self.entries.len()
     }
 
-    /// Get the number of groups in the database
+    /// Get the number of groups in the database, including the root group and the recycle bin (if it exists)
     pub fn num_groups(&self) -> usize {
         self.groups.len()
     }
 
-    /// Get an immutable group by id
-    pub fn group(&self, id: GroupId) -> Option<GroupRef<'_>> {
-        self.groups.get(&id).map(|_| GroupRef::new(self, id))
+    /// Iterate over all attachments with immutable access.
+    pub fn iter_all_attachments(&self) -> impl Iterator<Item = AttachmentRef<'_>> + '_ {
+        self.attachments
+            .keys()
+            .map(move |id| AttachmentRef::new(self, *id))
     }
 
-    /// Get a mutable group by id
-    pub fn group_mut(&mut self, id: GroupId) -> Option<GroupMut<'_>> {
-        self.groups.get(&id).map(|_| GroupMut::new(self, id))
+    /// Iterate over all attachments with mutable access. The provided closure is
+    /// called for each `AttachmentMut` and borrows are limited to the closure body.
+    pub fn foreach_attachment_mut<F>(&mut self, mut f: F)
+    where
+        F: FnMut(AttachmentMut<'_>),
+    {
+        let ids: Vec<AttachmentId> = self.attachments.keys().copied().collect();
+        for id in ids {
+            f(AttachmentMut::new(self, id));
+        }
     }
 
-    /// Get an immutable entry by id
-    pub fn entry(&self, id: EntryId) -> Option<EntryRef<'_>> {
-        self.entries.get(&id).map(|_| EntryRef::new(self, id))
+    /// Iterate over all entries with immutable access.
+    pub fn iter_all_entries(&self) -> impl Iterator<Item = EntryRef<'_>> + '_ {
+        self.entries.keys().map(move |id| EntryRef::new(self, *id))
     }
 
-    /// Get a mutable entry by id
-    pub fn entry_mut(&mut self, id: EntryId) -> Option<EntryMut<'_>> {
-        self.entries.get(&id).map(|_| EntryMut::new(self, id))
+    /// Iterate over all entries with mutable access. The provided closure is
+    /// called for each `EntryMut` and borrows are limited to the closure body.
+    pub fn foreach_entry_mut<F>(&mut self, mut f: F)
+    where
+        F: FnMut(EntryMut<'_>),
+    {
+        let ids: Vec<EntryId> = self.entries.keys().copied().collect();
+        for id in ids {
+            f(EntryMut::new(self, id));
+        }
     }
 
-    /// Get an immutable attachment by id
+    /// Iterate over all custom icons with immutable access.
+    pub fn iter_all_custom_icons(&self) -> impl Iterator<Item = CustomIconRef<'_>> + '_ {
+        self.custom_icons
+            .keys()
+            .map(move |id| CustomIconRef::new(self, *id))
+    }
+
+    /// Iterate over all custom icons with mutable access. The provided closure is
+    /// called for each `CustomIconMut` and borrows are limited to the closure body.
+    pub fn foreach_custom_icon_mut<F>(&mut self, mut f: F)
+    where
+        F: FnMut(CustomIconMut<'_>),
+    {
+        let ids: Vec<CustomIconId> = self.custom_icons.keys().copied().collect();
+        for id in ids {
+            f(CustomIconMut::new(self, id));
+        }
+    }
+
+    /// Iterate over all groups with immutable access. This includes the root group and the recycle
+    /// bin (if it exists).
+    pub fn iter_all_groups(&self) -> impl Iterator<Item = GroupRef<'_>> + '_ {
+        self.groups.keys().map(move |id| GroupRef::new(self, *id))
+    }
+
+    /// Iterate over all groups with mutable access. The provided closure is
+    /// called for each `GroupMut` and borrows are limited to the closure body.
+    pub fn foreach_group_mut<F>(&mut self, mut f: F)
+    where
+        F: FnMut(GroupMut<'_>),
+    {
+        let ids: Vec<GroupId> = self.groups.keys().copied().collect();
+        for id in ids {
+            f(GroupMut::new(self, id));
+        }
+    }
+
+    /// Get an immutable reference to the attachment with the given ID, if it exists
     pub fn attachment(&self, id: AttachmentId) -> Option<AttachmentRef<'_>> {
-        self.attachments.get(&id).map(|_| AttachmentRef::new(self, id))
+        self.attachments
+            .contains_key(&id)
+            .then(move || AttachmentRef::new(self, id))
     }
 
-    /// Get a mutable attachment by id
+    /// Get a mutable reference to the attachment with the given ID, if it exists
     pub fn attachment_mut(&mut self, id: AttachmentId) -> Option<AttachmentMut<'_>> {
-        self.attachments.get(&id).map(|_| AttachmentMut::new(self, id))
+        self.attachments
+            .contains_key(&id)
+            .then(move || AttachmentMut::new(self, id))
     }
 
-    /// Get an immutable custom icon by id
+    /// Get an immutable reference to the custom icon with the given ID, if it exists
     pub fn custom_icon(&self, id: CustomIconId) -> Option<CustomIconRef<'_>> {
-        self.custom_icons.get(&id).map(|_| CustomIconRef::new(self, id))
+        self.custom_icons
+            .contains_key(&id)
+            .then(move || CustomIconRef::new(self, id))
     }
 
-    /// Get a mutable custom icon by id
+    /// Get a mutable reference to the custom icon with the given ID, if it exists
     pub fn custom_icon_mut(&mut self, id: CustomIconId) -> Option<CustomIconMut<'_>> {
-        self.custom_icons.get(&id).map(|_| CustomIconMut::new(self, id))
+        self.custom_icons
+            .contains_key(&id)
+            .then(move || CustomIconMut::new(self, id))
     }
 
-    /// Get an iterator over all entries in the database
-    pub fn entries(&self) -> impl Iterator<Item = EntryRef<'_>> + '_ {
-        self.entries.keys().map(|id| EntryRef::new(self, *id))
+    /// Get an immutable reference to the entry with the given ID, if it exists
+    pub fn entry(&self, id: EntryId) -> Option<EntryRef<'_>> {
+        self.entries
+            .contains_key(&id)
+            .then(move || EntryRef::new(self, id))
     }
 
-    /// Get an iterator over all groups in the database
-    pub fn groups(&self) -> impl Iterator<Item = GroupRef<'_>> + '_ {
-        self.groups.keys().map(|id| GroupRef::new(self, *id))
+    /// Get a mutable reference to the entry with the given ID, if it exists
+    pub fn entry_mut(&mut self, id: EntryId) -> Option<EntryMut<'_>> {
+        self.entries
+            .contains_key(&id)
+            .then(move || EntryMut::new(self, id))
     }
 
-    /// Get an iterator over all attachments in the database
-    pub fn attachments(&self) -> impl Iterator<Item = AttachmentRef<'_>> + '_ {
-        self.attachments.keys().map(|id| AttachmentRef::new(self, *id))
+    /// Get an immutable reference to the group with the given ID, if it exists
+    pub fn group(&self, id: GroupId) -> Option<GroupRef<'_>> {
+        self.groups
+            .contains_key(&id)
+            .then(move || GroupRef::new(self, id))
     }
 
-    /// Get an iterator over all custom icons in the database
-    pub fn custom_icons(&self) -> impl Iterator<Item = CustomIconRef<'_>> + '_ {
-        self.custom_icons.keys().map(|id| CustomIconRef::new(self, *id))
+    /// Get a mutable reference to the group with the given ID, if it exists
+    pub fn group_mut(&mut self, id: GroupId) -> Option<GroupMut<'_>> {
+        self.groups
+            .contains_key(&id)
+            .then(move || GroupMut::new(self, id))
     }
 }
