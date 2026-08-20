@@ -16,7 +16,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 pub(crate) trait Cipher {
     #[cfg(feature = "save_kdbx4")]
     fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, CryptographyError>;
-    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptographyError>;
+    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptographyError>;
 
     #[cfg(feature = "save_kdbx4")]
     /// The number of bytes expected by the cipher as an initialization vector.
@@ -58,7 +58,7 @@ impl Cipher for AES256Cipher {
 
         Ok(ciphertext)
     }
-    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptographyError> {
+    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptographyError> {
         let mut out = Zeroizing::new(vec![0; ciphertext.len()]);
 
         let cipher = Aes256CbcDecryptor::new_from_slices(&self.key[..], &self.iv[..])?;
@@ -67,7 +67,7 @@ impl Cipher for AES256Cipher {
 
         out.truncate(len);
 
-        Ok(out)
+        Ok(std::mem::take(&mut *out))
     }
 
     #[cfg(feature = "save_kdbx4")]
@@ -109,12 +109,12 @@ impl Cipher for TwofishCipher {
         Ok(ciphertext)
     }
 
-    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptographyError> {
+    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptographyError> {
         let cipher = TwofishCbcDecryptor::new_from_slices(&self.key, &self.iv)?;
 
         let mut buf = Zeroizing::new(ciphertext.to_vec());
         cipher.decrypt_padded::<twofish::cipher::block_padding::Pkcs7>(&mut buf)?;
-        Ok(buf)
+        Ok(std::mem::take(&mut *buf))
     }
 
     #[cfg(feature = "save_kdbx4")]
@@ -150,10 +150,10 @@ impl Cipher for Salsa20Cipher {
         self.cipher.apply_keystream(&mut buffer);
         Ok(buffer)
     }
-    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptographyError> {
+    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptographyError> {
         let mut buffer = Zeroizing::new(Vec::from(ciphertext));
         self.cipher.apply_keystream(&mut buffer);
-        Ok(buffer)
+        Ok(std::mem::take(&mut *buffer))
     }
 
     #[cfg(feature = "save_kdbx4")]
@@ -205,10 +205,10 @@ impl Cipher for ChaCha20Cipher {
         self.cipher.apply_keystream(&mut buffer);
         Ok(buffer)
     }
-    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptographyError> {
+    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptographyError> {
         let mut buffer = Zeroizing::new(Vec::from(ciphertext));
         self.cipher.apply_keystream(&mut buffer);
-        Ok(buffer)
+        Ok(std::mem::take(&mut *buffer))
     }
 
     #[cfg(feature = "save_kdbx4")]
@@ -233,8 +233,8 @@ impl Cipher for PlainCipher {
     fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, CryptographyError> {
         Ok(Vec::from(plaintext))
     }
-    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptographyError> {
-        Ok(Zeroizing::new(Vec::from(ciphertext)))
+    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptographyError> {
+        Ok(Vec::from(ciphertext))
     }
 
     #[cfg(feature = "save_kdbx4")]
