@@ -1,7 +1,8 @@
 use crate::{
+    compression::DecompressionError,
     config::{CompressionConfig, DatabaseConfig, InnerCipherConfig, KdfConfig, OuterCipherConfig},
     crypt::{calculate_sha256, ciphers::Cipher},
-    db::{Database, DatabaseFormatError, DatabaseOpenError},
+    db::{Database, DatabaseFormatError, DatabaseOpenError, DatabaseOpenLimits, DatabaseResourceLimitError},
     format::DatabaseVersion,
     key::{DatabaseKey, DatabaseKeyError},
 };
@@ -184,11 +185,28 @@ pub enum Kdbx3OuterHeaderError {
 
 /// Open, decrypt and parse a KeePass database from a source and a password
 pub(crate) fn parse_kdbx3(data: &[u8], db_key: &DatabaseKey) -> Result<Database, DatabaseOpenError> {
-    let (config, mut inner_decryptor, xml) = decrypt_kdbx3(data, db_key)?;
+    parse_kdbx3_with_limits(data, db_key, DatabaseOpenLimits::default())
+}
+
+pub(crate) fn parse_kdbx3_with_limits(
+    data: &[u8],
+    db_key: &DatabaseKey,
+    limits: DatabaseOpenLimits,
+) -> Result<Database, DatabaseOpenError> {
+    let (config, mut inner_decryptor, xml) = decrypt_kdbx3_with_limits(data, db_key, limits)?;
 
     // Parse XML data blocks
-    let mut db = crate::format::xml_db::parse_xml(&xml, &[], &mut *inner_decryptor)
-        .map_err(|e| DatabaseOpenError::Format(DatabaseFormatError::Kdbx3(Kdbx3OpenError::Xml(e))))?;
+    let mut db = match crate::format::xml_db::parse_xml_with_limits(&xml, &[], &mut *inner_decryptor, limits) {
+        Ok(db) => db,
+        Err(crate::format::xml_db::ParseXmlError::ResourceLimit(error)) => {
+            return Err(DatabaseOpenError::ResourceLimit(error));
+        }
+        Err(error) => {
+            return Err(DatabaseOpenError::Format(DatabaseFormatError::Kdbx3(
+                Kdbx3OpenError::Xml(error),
+            )));
+        }
+    };
 
     db.config = config;
 
@@ -200,6 +218,15 @@ pub(crate) fn parse_kdbx3(data: &[u8], db_key: &DatabaseKey) -> Result<Database,
 pub(crate) fn decrypt_kdbx3(
     data: &[u8],
     db_key: &DatabaseKey,
+) -> Result<(DatabaseConfig, Box<dyn Cipher>, Vec<u8>), DatabaseOpenError> {
+    decrypt_kdbx3_with_limits(data, db_key, DatabaseOpenLimits::default())
+}
+
+#[allow(clippy::type_complexity)]
+pub(crate) fn decrypt_kdbx3_with_limits(
+    data: &[u8],
+    db_key: &DatabaseKey,
+    limits: DatabaseOpenLimits,
 ) -> Result<(DatabaseConfig, Box<dyn Cipher>, Vec<u8>), DatabaseOpenError> {
     let version = DatabaseVersion::parse(data)?;
     let header = parse_outer_header(data)
@@ -301,7 +328,16 @@ pub(crate) fn decrypt_kdbx3(
         block_index += 1;
     }
 
-    let xml = compression.decompress(&buf)?;
+    let xml = match compression.decompress_with_limit(&buf, limits.max_decompressed_payload_bytes) {
+        Ok(xml) => xml,
+        Err(DecompressionError::Io(error)) => return Err(DatabaseOpenError::Io(error)),
+        Err(DecompressionError::OutputLimitExceeded { .. }) => {
+            return Err(DatabaseResourceLimitError::DecompressedPayloadBytes {
+                limit: limits.max_decompressed_payload_bytes,
+            }
+            .into());
+        }
+    };
 
     Ok((config, inner_decryptor, xml))
 }

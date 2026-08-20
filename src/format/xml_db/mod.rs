@@ -21,22 +21,34 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    compression::{Compression, DecompressionError},
     crypt::ciphers::Cipher,
-    db::{GroupId, Value},
+    db::{DatabaseOpenLimits, DatabaseResourceLimitError, GroupId, Value},
     format::xml_db::{
-        custom_serde::cs_opt_string, entry::UnprotectError, group::Group, meta::Meta, timestamp::Timestamp,
+        custom_serde::cs_opt_string,
+        entry::UnprotectError,
+        group::Group,
+        meta::{Binary, Meta},
+        timestamp::Timestamp,
     },
 };
 #[cfg(feature = "save_kdbx4")]
 use crate::{crypt::CryptographyError, db::DatabaseSaveError};
 
-pub fn parse_xml(
+pub(crate) fn parse_xml_with_limits(
     data: &[u8],
     header_attachments: &[Value<Vec<u8>>],
     inner_decryptor: &mut dyn Cipher,
+    limits: DatabaseOpenLimits,
 ) -> Result<crate::db::Database, ParseXmlError> {
-    let kdbx: KeePassFile = quick_xml::de::from_reader(data)?;
-    Ok(kdbx.xml_to_db(inner_decryptor, header_attachments)?)
+    let mut deserializer = quick_xml::de::Deserializer::from_reader(data);
+    let mut ignored_xml_paths = Vec::new();
+    let kdbx: KeePassFile = serde_ignored::deserialize(&mut deserializer, |path| {
+        ignored_xml_paths.push(path.to_string());
+    })?;
+    let mut db = kdbx.xml_to_db(inner_decryptor, header_attachments, limits)?;
+    db.ignored_xml_paths = ignored_xml_paths;
+    Ok(db)
 }
 
 /// Errors that can occur during parsing of the inner XML database of a KDBX file
@@ -51,6 +63,81 @@ pub enum ParseXmlError {
     /// encryption methods.
     #[error("Error unprotecting entry: {0}")]
     Unprotect(#[from] UnprotectError),
+
+    /// A configured resource limit was exceeded while materializing the database.
+    #[error(transparent)]
+    ResourceLimit(#[from] DatabaseResourceLimitError),
+}
+
+#[derive(Debug, Error)]
+enum BinaryOpenError {
+    #[error(transparent)]
+    Unprotect(#[from] UnprotectError),
+
+    #[error("decoded/decompressed binary exceeds configured limit")]
+    OutputLimitExceeded,
+}
+
+fn decode_binary_with_limit(
+    binary: Binary,
+    inner_decryptor: &mut dyn Cipher,
+    max_output_bytes: usize,
+) -> Result<Value<Vec<u8>>, BinaryOpenError> {
+    let mut data = base64_engine::STANDARD
+        .decode(binary.value)
+        .map_err(UnprotectError::from)?;
+    let protected = binary.protected.unwrap_or(false);
+
+    if protected {
+        data = inner_decryptor.decrypt(&data).map_err(UnprotectError::from)?;
+    }
+
+    if binary.compressed.unwrap_or(false) {
+        data = match crate::compression::GZipCompression.decompress_with_limit(&data, max_output_bytes) {
+            Ok(data) => data,
+            Err(DecompressionError::Io(error)) => {
+                return Err(UnprotectError::Io(error).into());
+            }
+            Err(DecompressionError::OutputLimitExceeded { .. }) => {
+                return Err(BinaryOpenError::OutputLimitExceeded);
+            }
+        };
+    } else if data.len() > max_output_bytes {
+        return Err(BinaryOpenError::OutputLimitExceeded);
+    }
+
+    Ok(if protected {
+        Value::protected(data)
+    } else {
+        Value::unprotected(data)
+    })
+}
+
+fn account_binary_size(
+    size: usize,
+    total_binary_bytes: &mut usize,
+    limits: DatabaseOpenLimits,
+) -> Result<(), DatabaseResourceLimitError> {
+    if size > limits.max_decompressed_binary_bytes {
+        return Err(DatabaseResourceLimitError::DecompressedBinaryBytes {
+            limit: limits.max_decompressed_binary_bytes,
+        });
+    }
+
+    let new_total = total_binary_bytes.checked_add(size).ok_or(
+        DatabaseResourceLimitError::TotalDecompressedBinaryBytes {
+            limit: limits.max_total_decompressed_binary_bytes,
+        },
+    )?;
+
+    if new_total > limits.max_total_decompressed_binary_bytes {
+        return Err(DatabaseResourceLimitError::TotalDecompressedBinaryBytes {
+            limit: limits.max_total_decompressed_binary_bytes,
+        });
+    }
+
+    *total_binary_bytes = new_total;
+    Ok(())
 }
 
 #[cfg(feature = "save_kdbx4")]
@@ -90,13 +177,17 @@ impl KeePassFile {
         mut self,
         inner_decryptor: &mut dyn Cipher,
         header_attachments: &[Value<Vec<u8>>],
-    ) -> Result<crate::db::Database, UnprotectError> {
+        limits: DatabaseOpenLimits,
+    ) -> Result<crate::db::Database, ParseXmlError> {
         let mut db = crate::db::Database::new_with_root_id(GroupId::from_uuid(self.root.group.uuid.0));
 
         let mut attachments = HashMap::new();
+        let mut total_binary_bytes = 0_usize;
 
         // convert header attachments (KDBX4-style) to database attachments
         for (i, header_attachment) in header_attachments.iter().enumerate() {
+            account_binary_size(header_attachment.len(), &mut total_binary_bytes, limits)?;
+
             let attachment = crate::db::Attachment {
                 id: crate::db::AttachmentId::new(i),
                 entries: HashSet::new(),
@@ -109,7 +200,33 @@ impl KeePassFile {
         if let Some(binaries) = self.meta.binaries.take() {
             for binary in binaries.binaries {
                 let id = crate::db::AttachmentId::next_free(&db);
-                let data = binary.xml_to_db(inner_decryptor)?;
+                let remaining_total = limits
+                    .max_total_decompressed_binary_bytes
+                    .saturating_sub(total_binary_bytes);
+                let active_limit = limits.max_decompressed_binary_bytes.min(remaining_total);
+
+                let data = if limits == DatabaseOpenLimits::UNLIMITED {
+                    binary.xml_to_db(inner_decryptor)?
+                } else {
+                    match decode_binary_with_limit(binary, inner_decryptor, active_limit) {
+                        Ok(data) => data,
+                        Err(BinaryOpenError::Unprotect(error)) => return Err(error.into()),
+                        Err(BinaryOpenError::OutputLimitExceeded) => {
+                            let error = if remaining_total < limits.max_decompressed_binary_bytes {
+                                DatabaseResourceLimitError::TotalDecompressedBinaryBytes {
+                                    limit: limits.max_total_decompressed_binary_bytes,
+                                }
+                            } else {
+                                DatabaseResourceLimitError::DecompressedBinaryBytes {
+                                    limit: limits.max_decompressed_binary_bytes,
+                                }
+                            };
+                            return Err(error.into());
+                        }
+                    }
+                };
+
+                account_binary_size(data.len(), &mut total_binary_bytes, limits)?;
 
                 attachments.insert(
                     id,
@@ -343,6 +460,28 @@ mod tests {
 
         assert!(serialized.contains("<DeletionTime>"));
         assert!(!serialized.contains("<deletion_time>"));
+    }
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "PascalCase")]
+    struct IgnoredFieldProbe {
+        known: String,
+    }
+
+    #[test]
+    fn test_quick_xml_reports_ignored_fields_through_serde_ignored() {
+        let xml =
+            "<IgnoredFieldProbe><Known>kept</Known><FortressUnknown>lost</FortressUnknown></IgnoredFieldProbe>";
+        let mut deserializer = quick_xml::de::Deserializer::from_str(xml);
+        let mut ignored = Vec::new();
+
+        let parsed: IgnoredFieldProbe = serde_ignored::deserialize(&mut deserializer, |path| {
+            ignored.push(path.to_string());
+        })
+        .unwrap();
+
+        assert_eq!(parsed.known, "kept");
+        assert!(ignored.iter().any(|path| path.contains("FortressUnknown")));
     }
 
     #[test]

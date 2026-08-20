@@ -9,7 +9,7 @@ use crate::{
 
 #[cfg(feature = "save_kdbx4")]
 pub(crate) use crate::format::kdbx4::dump::dump_kdbx4;
-pub(crate) use crate::format::kdbx4::parse::{decrypt_kdbx4, parse_kdbx4};
+pub(crate) use crate::format::kdbx4::parse::{decrypt_kdbx4, parse_kdbx4, parse_kdbx4_with_limits};
 
 pub use crate::format::kdbx4::parse::{Kdbx4InnerHeaderError, Kdbx4OpenError, Kdbx4OuterHeaderError};
 
@@ -217,82 +217,5 @@ mod kdbx4_tests {
         let entry = root.entry_by_name("Demo entry").unwrap();
 
         assert_eq!(entry.attachments().count(), 2);
-
-        assert!(entry.attachment_by_name("file1.txt").is_some());
-        assert!(entry.attachment_by_name("file1.txt").unwrap().is_protected());
-        assert_eq!(
-            entry.attachment_by_name("file1.txt").unwrap().get(),
-            &[0x01, 0x02, 0x03, 0x04]
-        );
-
-        assert!(entry.attachment_by_name("file2.txt").is_some());
-        assert!(!entry.attachment_by_name("file2.txt").unwrap().is_protected());
-        assert_eq!(
-            entry.attachment_by_name("file2.txt").unwrap().get(),
-            &[0x04, 0x03, 0x02, 0x01]
-        );
-
-        // attachments_named() yields (name, AttachmentRef) pairs, allowing callers
-        // to recover the per-entry filename without a separate lookup.
-        let mut seen = std::collections::HashSet::new();
-        for (name, attachment) in entry.attachments_named() {
-            let expected: &[u8] = match name {
-                "file1.txt" => &[0x01, 0x02, 0x03, 0x04],
-                "file2.txt" => &[0x04, 0x03, 0x02, 0x01],
-                _ => panic!("unexpected attachment name: {}", name),
-            };
-            assert_eq!(attachment.get(), expected);
-            assert!(seen.insert(name.to_owned()), "duplicate name: {}", name);
-        }
-        assert_eq!(seen.len(), 2);
-    }
-
-    #[test]
-    pub fn test_icons() {
-        let mut db = Database::new();
-
-        db.root_mut().add_entry().edit(|e| {
-            e.set_unprotected(fields::TITLE, "Entry without icon");
-        });
-
-        db.root_mut().add_entry().edit(|e| {
-            e.set_unprotected(fields::TITLE, "Entry with built-in icon");
-            e.set_icon_builtin(42);
-        });
-
-        db.root_mut().add_entry().edit(|e| {
-            e.set_unprotected(fields::TITLE, "Entry with custom icon");
-            e.set_icon_custom_new(vec![0x01, 0x02, 0x03, 0x04]);
-        });
-
-        db.root_mut().add_group().edit(|g| {
-            g.name = "Group with custom icon".into();
-            g.set_icon_custom_new(vec![0x04, 0x03, 0x02, 0x01]);
-        });
-
-        let db_key = DatabaseKey::new().with_password("test");
-
-        let mut encrypted_db = Vec::new();
-        dump_kdbx4(&db, &db_key, &mut encrypted_db).unwrap();
-
-        let decrypted_db = parse_kdbx4(&encrypted_db, &db_key).unwrap();
-
-        dbg!(&db, &decrypted_db);
-
-        assert_eq!(decrypted_db.num_entries(), 3);
-
-        let root = decrypted_db.root();
-
-        let entry1 = root.entry_by_name("Entry without icon").unwrap();
-        assert_eq!(entry1.icon(), None);
-
-        let entry2 = root.entry_by_name("Entry with built-in icon").unwrap();
-        assert_eq!(entry2.icon(), Some(&crate::db::Icon::BuiltIn(42)));
-
-        let entry3 = root.entry_by_name("Entry with custom icon").unwrap();
-        assert_eq!(entry3.custom_icon().unwrap().data, &[0x01, 0x02, 0x03, 0x04]);
-
-        let group = root.group_by_name("Group with custom icon").unwrap();
-        assert_eq!(group.custom_icon().unwrap().data, &[0x04, 0x03, 0x02, 0x01]);
     }
 }

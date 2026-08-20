@@ -59,6 +59,14 @@ pub struct Database {
 
     /// References to previously-deleted objects and their deletion times.
     pub deleted_objects: HashMap<Uuid, Option<NaiveDateTime>>,
+
+    /// XML paths that the tolerant KDBX deserializer did not model.
+    ///
+    /// These paths are retained as compatibility diagnostics so callers can keep read support
+    /// tolerant while refusing a potentially lossy save. The ignored values themselves are not
+    /// retained and therefore cannot be serialized safely by this engine.
+    #[cfg_attr(feature = "serialization", serde(skip))]
+    pub(crate) ignored_xml_paths: Vec<String>,
 }
 
 impl Database {
@@ -93,6 +101,7 @@ impl Database {
             entries: HashMap::new(),
             groups,
             deleted_objects: HashMap::new(),
+            ignored_xml_paths: Vec::new(),
         }
     }
 
@@ -111,7 +120,21 @@ impl Database {
             entries: HashMap::new(),
             groups,
             deleted_objects: HashMap::new(),
+            ignored_xml_paths: Vec::new(),
         }
+    }
+
+    /// Return XML paths that were ignored by the tolerant deserializer.
+    ///
+    /// A non-empty result means this engine did not model all source XML and callers must treat
+    /// ordinary serialization as potentially lossy.
+    pub fn ignored_xml_paths(&self) -> &[String] {
+        &self.ignored_xml_paths
+    }
+
+    /// Whether the source contained XML fields not modeled by this engine.
+    pub fn has_ignored_xml_fields(&self) -> bool {
+        !self.ignored_xml_paths.is_empty()
     }
 
     /// Get an immutable reference to the root group of the database.

@@ -5,15 +5,115 @@ use crate::{
     db::Database,
     format::{
         kdb::parse_kdb,
-        kdbx3::{decrypt_kdbx3, parse_kdbx3},
-        kdbx4::{decrypt_kdbx4, parse_kdbx4},
+        kdbx3::{decrypt_kdbx3, parse_kdbx3, parse_kdbx3_with_limits},
+        kdbx4::{decrypt_kdbx4, parse_kdbx4, parse_kdbx4_with_limits},
         DatabaseVersionParseError,
     },
     DatabaseKey,
 };
 
+/// Resource limits applied while opening a database through the bounded APIs.
+///
+/// The existing [`Database::open`] and [`Database::parse`] methods retain their historical
+/// behavior. Callers processing untrusted KDBX files should prefer [`Database::open_with_limits`]
+/// or [`Database::parse_with_limits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DatabaseOpenLimits {
+    /// Maximum number of bytes read from an input stream by [`Database::open_with_limits`].
+    pub max_input_bytes: usize,
+    /// Maximum number of bytes produced by decompression of the KDBX payload.
+    pub max_decompressed_payload_bytes: usize,
+    /// Maximum size of a single binary attachment after decoding/decompression.
+    pub max_decompressed_binary_bytes: usize,
+    /// Maximum aggregate size of binary attachments after decoding/decompression.
+    pub max_total_decompressed_binary_bytes: usize,
+}
+
+impl DatabaseOpenLimits {
+    /// Limits that preserve the historical effectively-unbounded behavior.
+    pub const UNLIMITED: Self = Self {
+        max_input_bytes: usize::MAX,
+        max_decompressed_payload_bytes: usize::MAX,
+        max_decompressed_binary_bytes: usize::MAX,
+        max_total_decompressed_binary_bytes: usize::MAX,
+    };
+}
+
+impl Default for DatabaseOpenLimits {
+    fn default() -> Self {
+        Self::UNLIMITED
+    }
+}
+
+/// Resource-limit failures raised by the bounded database-opening APIs.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DatabaseResourceLimitError {
+    /// The encoded database input exceeded the configured byte limit.
+    #[error("database input exceeds configured limit of {limit} bytes")]
+    InputBytes {
+        /// Maximum permitted encoded input size in bytes.
+        limit: usize,
+    },
+
+    /// The decompressed KDBX payload exceeded the configured byte limit.
+    #[error("decompressed database payload exceeds configured limit of {limit} bytes")]
+    DecompressedPayloadBytes {
+        /// Maximum permitted decompressed KDBX payload size in bytes.
+        limit: usize,
+    },
+
+    /// A decoded/decompressed binary attachment exceeded the configured byte limit.
+    #[error("decompressed binary exceeds configured limit of {limit} bytes")]
+    DecompressedBinaryBytes {
+        /// Maximum permitted size of one decoded/decompressed binary attachment in bytes.
+        limit: usize,
+    },
+
+    /// Aggregate decoded/decompressed binary data exceeded the configured byte limit.
+    #[error("total decompressed binary data exceeds configured limit of {limit} bytes")]
+    TotalDecompressedBinaryBytes {
+        /// Maximum permitted aggregate decoded/decompressed binary size in bytes.
+        limit: usize,
+    },
+}
+
+fn read_to_end_with_limit(
+    source: &mut dyn std::io::Read,
+    max_input_bytes: usize,
+) -> Result<Vec<u8>, DatabaseOpenError> {
+    if max_input_bytes == usize::MAX {
+        let mut data = Vec::new();
+        source.read_to_end(&mut data)?;
+        return Ok(data);
+    }
+
+    let mut data = Vec::with_capacity(max_input_bytes.min(8192));
+    let mut buffer = [0_u8; 8192];
+
+    while data.len() < max_input_bytes {
+        let remaining = max_input_bytes - data.len();
+        let read_len = remaining.min(buffer.len());
+        let bytes_read = source.read(&mut buffer[..read_len])?;
+        if bytes_read == 0 {
+            return Ok(data);
+        }
+        data.extend_from_slice(&buffer[..bytes_read]);
+    }
+
+    let mut probe = [0_u8; 1];
+    if source.read(&mut probe)? != 0 {
+        return Err(DatabaseResourceLimitError::InputBytes {
+            limit: max_input_bytes,
+        }
+        .into());
+    }
+
+    Ok(data)
+}
+
 impl Database {
-    /// Parse a database from a std::io::Read
+    /// Parse a database from a std::io::Read.
     pub fn open(source: &mut dyn std::io::Read, key: DatabaseKey) -> Result<Database, DatabaseOpenError> {
         let mut data = Vec::new();
         source.read_to_end(&mut data)?;
@@ -21,7 +121,17 @@ impl Database {
         Database::parse(data.as_ref(), key)
     }
 
-    /// Parse a database from a byte slice
+    /// Parse a database from a std::io::Read while enforcing resource limits.
+    pub fn open_with_limits(
+        source: &mut dyn std::io::Read,
+        key: DatabaseKey,
+        limits: DatabaseOpenLimits,
+    ) -> Result<Database, DatabaseOpenError> {
+        let data = read_to_end_with_limit(source, limits.max_input_bytes)?;
+        Database::parse_with_limits(data.as_ref(), key, limits)
+    }
+
+    /// Parse a database from a byte slice.
     pub fn parse(data: &[u8], key: DatabaseKey) -> Result<Database, DatabaseOpenError> {
         let database_version = DatabaseVersion::parse(data)?;
 
@@ -33,7 +143,30 @@ impl Database {
         }
     }
 
-    /// Helper function to load a database into its internal XML chunks
+    /// Parse a database from a byte slice while enforcing resource limits.
+    pub fn parse_with_limits(
+        data: &[u8],
+        key: DatabaseKey,
+        limits: DatabaseOpenLimits,
+    ) -> Result<Database, DatabaseOpenError> {
+        if data.len() > limits.max_input_bytes {
+            return Err(DatabaseResourceLimitError::InputBytes {
+                limit: limits.max_input_bytes,
+            }
+            .into());
+        }
+
+        let database_version = DatabaseVersion::parse(data)?;
+
+        match database_version {
+            DatabaseVersion::KDB(_) => parse_kdb(data, &key),
+            DatabaseVersion::KDB2(_) => Err(DatabaseOpenError::UnsupportedVersion),
+            DatabaseVersion::KDB3(_) => parse_kdbx3_with_limits(data, &key, limits),
+            DatabaseVersion::KDB4(_) => parse_kdbx4_with_limits(data, &key, limits),
+        }
+    }
+
+    /// Helper function to load a database into its internal XML chunks.
     pub fn get_xml(source: &mut dyn std::io::Read, key: DatabaseKey) -> Result<Vec<u8>, DatabaseOpenError> {
         let mut data = Vec::new();
         source.read_to_end(&mut data)?;
@@ -50,7 +183,7 @@ impl Database {
         Ok(data)
     }
 
-    /// Get the version of a database without decrypting it
+    /// Get the version of a database without decrypting it.
     pub fn get_version(source: &mut dyn std::io::Read) -> Result<DatabaseVersion, DatabaseOpenError> {
         let mut data = vec![0; DatabaseVersion::get_version_header_size()];
         source.read_exact(&mut data)?;
@@ -59,52 +192,56 @@ impl Database {
     }
 }
 
-/// Errors that can occur when opening a database
+/// Errors that can occur when opening a database.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum DatabaseOpenError {
-    /// I/O errors that can occur while reading the database from the source
+    /// I/O errors that can occur while reading the database from the source.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
-    /// An unexpected end of file was encountered while reading the database
+    /// Resource limits configured by a bounded open/parse API were exceeded.
+    #[error(transparent)]
+    ResourceLimit(#[from] DatabaseResourceLimitError),
+
+    /// An unexpected end of file was encountered while reading the database.
     #[error("Unexpected end of file")]
     UnexpectedEof,
 
-    /// Errors related to parsing the database version from the file header
+    /// Errors related to parsing the database version from the file header.
     #[error(transparent)]
     VersionParse(#[from] DatabaseVersionParseError),
 
-    /// Attempted to open a database with an unsupported version
+    /// Attempted to open a database with an unsupported version.
     #[error("Unsupported database version")]
     UnsupportedVersion,
 
-    /// Errors related to the database key, such as incorrect keys
+    /// Errors related to the database key, such as incorrect keys.
     #[error(transparent)]
     Key(#[from] crate::key::DatabaseKeyError),
 
-    /// Errors related to decryption
+    /// Errors related to decryption.
     #[error(transparent)]
     Cryptography(#[from] crate::crypt::CryptographyError),
 
-    /// Errors related to parsing the database format
+    /// Errors related to parsing the database format.
     #[error(transparent)]
     Format(#[from] DatabaseFormatError),
 }
 
-/// Format-specific database parsing errors
+/// Format-specific database parsing errors.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum DatabaseFormatError {
-    /// Errors related to parsing KDB files
+    /// Errors related to parsing KDB files.
     #[error(transparent)]
     Kdb(#[from] crate::format::kdb::KdbOpenError),
 
-    /// Errors related to parsing KDBX3 files
+    /// Errors related to parsing KDBX3 files.
     #[error(transparent)]
     Kdbx3(#[from] crate::format::kdbx3::Kdbx3OpenError),
 
-    /// Errors related to parsing KDBX4 files
+    /// Errors related to parsing KDBX4 files.
     #[error(transparent)]
     Kdbx4(#[from] crate::format::kdbx4::Kdbx4OpenError),
 }
