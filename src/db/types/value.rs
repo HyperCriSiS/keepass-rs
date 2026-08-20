@@ -55,6 +55,15 @@ impl<T: Zeroize> Value<T> {
     }
 }
 
+impl<T: Zeroize> Drop for Value<T> {
+    fn drop(&mut self) {
+        if let Value::Unprotected(data) = self {
+            data.zeroize();
+        }
+        // Protected values are owned by SecretBox, which zeroizes its secret on drop.
+    }
+}
+
 impl<T: Zeroize + Clone> Clone for Value<T> {
     fn clone(&self) -> Self {
         match self {
@@ -99,7 +108,32 @@ impl<T: Zeroize + serde::Serialize> serde::Serialize for Value<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    use zeroize::Zeroize;
+
     use super::Value;
+
+    #[derive(Debug)]
+    struct ZeroizeProbe(Arc<AtomicBool>);
+
+    impl Zeroize for ZeroizeProbe {
+        fn zeroize(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn unprotected_values_are_zeroized_on_drop() {
+        let zeroized = Arc::new(AtomicBool::new(false));
+        {
+            let _value = Value::unprotected(ZeroizeProbe(Arc::clone(&zeroized)));
+        }
+        assert!(zeroized.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn test_value() {
