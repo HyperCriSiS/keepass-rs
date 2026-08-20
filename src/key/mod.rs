@@ -1,9 +1,9 @@
-use std::io::Read;
+use std::{fmt, io::Read};
 
 use base64::{engine::general_purpose as base64_engine, Engine as _};
 use quick_xml::{encoding::EncodingError, events::Event, reader::Reader};
 use thiserror::Error;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::crypt::calculate_sha256;
 
@@ -20,10 +20,10 @@ fn parse_xml_keyfile(xml: &[u8]) -> Result<KeyElement, ParseXmlKeyFileError> {
     let mut tag_stack = Vec::new();
 
     let mut key_version: Option<String> = None;
-    let mut key_value: Option<String> = None;
+    let mut key_value: Option<Zeroizing<String>> = None;
 
     let mut reader = Reader::from_reader(xml);
-    let mut buf = Vec::new();
+    let mut buf = Zeroizing::new(Vec::new());
 
     loop {
         match reader.read_event_into(&mut buf)? {
@@ -46,7 +46,7 @@ fn parse_xml_keyfile(xml: &[u8]) -> Result<KeyElement, ParseXmlKeyFileError> {
                 }
 
                 if tag_stack == ["KeyFile", "Key", "Data"] {
-                    key_value = Some(s);
+                    key_value = Some(Zeroizing::new(s));
                     continue;
                 }
             }
@@ -57,30 +57,32 @@ fn parse_xml_keyfile(xml: &[u8]) -> Result<KeyElement, ParseXmlKeyFileError> {
 
     let key_value = key_value.ok_or(ParseXmlKeyFileError::EmptyKey)?;
 
-    let key_bytes = key_value.as_bytes().to_vec();
+    let mut key_bytes = Zeroizing::new(key_value.as_bytes().to_vec());
 
     if key_version == Some("2.0".to_string()) {
         // TODO we should also validate the integrity of a v2 keyfile using the hash value
 
-        let trimmed_key = key_value
-            .trim()
-            .replace(" ", "")
-            .replace("\n", "")
-            .replace("\t", "")
-            .replace("\r", "");
+        let trimmed_key = Zeroizing::new(
+            key_value
+                .trim()
+                .replace(" ", "")
+                .replace("\n", "")
+                .replace("\t", "")
+                .replace("\r", ""),
+        );
 
-        return if let Ok(key) = hex::decode(&trimmed_key) {
+        return if let Ok(key) = hex::decode(trimmed_key.as_bytes()) {
             Ok(key)
         } else {
-            Ok(key_bytes)
+            Ok(std::mem::take(&mut *key_bytes))
         };
     }
 
     // Check if the key is base64-encoded. If yes, return decoded bytes
-    if let Ok(key) = base64_engine::STANDARD.decode(&key_bytes) {
+    if let Ok(key) = base64_engine::STANDARD.decode(key_bytes.as_slice()) {
         Ok(key)
     } else {
-        Ok(key_bytes)
+        Ok(std::mem::take(&mut *key_bytes))
     }
 }
 
@@ -124,7 +126,7 @@ fn parse_keyfile(buffer: &[u8]) -> Result<KeyElement, DatabaseKeyError> {
 }
 
 /// A KeePass key, which might consist of a password and/or a keyfile
-#[derive(Debug, Clone, Default, PartialEq, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Default, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct DatabaseKey {
     password: Option<String>,
     keyfile: Option<Vec<u8>>,
@@ -132,6 +134,26 @@ pub struct DatabaseKey {
     challenge_response_key: Option<ChallengeResponseKey>,
     #[cfg(feature = "challenge_response")]
     challenge_response_result: Option<KeyElement>,
+}
+
+impl fmt::Debug for DatabaseKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("DatabaseKey");
+        debug.field("password_present", &self.password.is_some());
+        debug.field("keyfile_present", &self.keyfile.is_some());
+        #[cfg(feature = "challenge_response")]
+        {
+            debug.field(
+                "challenge_response_key_present",
+                &self.challenge_response_key.is_some(),
+            );
+            debug.field(
+                "challenge_response_result_present",
+                &self.challenge_response_result.is_some(),
+            );
+        }
+        debug.finish()
+    }
 }
 
 impl DatabaseKey {
@@ -164,10 +186,10 @@ impl DatabaseKey {
     /// requested, so errors with keyfile parsing will only be raised at that point, not when
     /// calling this method.
     pub fn with_keyfile(mut self, keyfile: &mut dyn Read) -> Result<Self, std::io::Error> {
-        let mut buf = Vec::new();
+        let mut buf = Zeroizing::new(Vec::new());
         keyfile.read_to_end(&mut buf)?;
 
-        self.keyfile = Some(buf);
+        self.keyfile = Some(std::mem::take(&mut *buf));
 
         Ok(self)
     }
@@ -270,6 +292,20 @@ pub enum DatabaseKeyError {
 mod key_tests {
 
     use super::{DatabaseKey, DatabaseKeyError};
+
+    #[test]
+    fn debug_redacts_owned_secret_material() -> Result<(), DatabaseKeyError> {
+        let key = DatabaseKey::new()
+            .with_password("debug-password-sentinel")
+            .with_keyfile(&mut "debug-keyfile-sentinel".as_bytes())?;
+
+        let debug = format!("{key:?}");
+        assert!(!debug.contains("debug-password-sentinel"));
+        assert!(!debug.contains("debug-keyfile-sentinel"));
+        assert!(debug.contains("password_present: true"));
+        assert!(debug.contains("keyfile_present: true"));
+        Ok(())
+    }
 
     #[test]
     fn test_key() -> Result<(), DatabaseKeyError> {
