@@ -25,24 +25,15 @@ use crate::{
     crypt::ciphers::Cipher,
     db::{DatabaseOpenLimits, DatabaseResourceLimitError, GroupId, Value},
     format::xml_db::{
-        custom_serde::cs_opt_string, entry::UnprotectError, group::Group, meta::{Binary, Meta}, timestamp::Timestamp,
+        custom_serde::cs_opt_string,
+        entry::UnprotectError,
+        group::Group,
+        meta::{Binary, Meta},
+        timestamp::Timestamp,
     },
 };
 #[cfg(feature = "save_kdbx4")]
 use crate::{crypt::CryptographyError, db::DatabaseSaveError};
-
-pub fn parse_xml(
-    data: &[u8],
-    header_attachments: &[Value<Vec<u8>>],
-    inner_decryptor: &mut dyn Cipher,
-) -> Result<crate::db::Database, ParseXmlError> {
-    parse_xml_with_limits(
-        data,
-        header_attachments,
-        inner_decryptor,
-        DatabaseOpenLimits::default(),
-    )
-}
 
 pub(crate) fn parse_xml_with_limits(
     data: &[u8],
@@ -98,15 +89,11 @@ fn decode_binary_with_limit(
     let protected = binary.protected.unwrap_or(false);
 
     if protected {
-        data = inner_decryptor
-            .decrypt(&data)
-            .map_err(UnprotectError::from)?;
+        data = inner_decryptor.decrypt(&data).map_err(UnprotectError::from)?;
     }
 
     if binary.compressed.unwrap_or(false) {
-        data = match crate::compression::GZipCompression
-            .decompress_with_limit(&data, max_output_bytes)
-        {
+        data = match crate::compression::GZipCompression.decompress_with_limit(&data, max_output_bytes) {
             Ok(data) => data,
             Err(DecompressionError::Io(error)) => {
                 return Err(UnprotectError::Io(error).into());
@@ -137,11 +124,11 @@ fn account_binary_size(
         });
     }
 
-    let new_total = total_binary_bytes
-        .checked_add(size)
-        .ok_or(DatabaseResourceLimitError::TotalDecompressedBinaryBytes {
+    let new_total = total_binary_bytes.checked_add(size).ok_or(
+        DatabaseResourceLimitError::TotalDecompressedBinaryBytes {
             limit: limits.max_total_decompressed_binary_bytes,
-        })?;
+        },
+    )?;
 
     if new_total > limits.max_total_decompressed_binary_bytes {
         return Err(DatabaseResourceLimitError::TotalDecompressedBinaryBytes {

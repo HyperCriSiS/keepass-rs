@@ -142,9 +142,7 @@ mod tests {
 
     #[test]
     fn no_compression_rejects_input_over_limit() {
-        let error = NoCompression
-            .decompress_with_limit(&[0_u8; 2], 1)
-            .unwrap_err();
+        let error = NoCompression.decompress_with_limit(&[0_u8; 2], 1).unwrap_err();
 
         assert!(matches!(
             error,
