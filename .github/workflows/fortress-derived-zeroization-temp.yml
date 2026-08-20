@@ -1,0 +1,88 @@
+name: Fortress derived secret hardening temp
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fortress/derived-key-zeroization
+          fetch-depth: 0
+      - name: Apply zeroization hardening
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def edit(path, replacements, prepend_after=None):
+              p = Path(path)
+              s = p.read_text()
+              if prepend_after:
+                  old, new = prepend_after
+                  if old not in s:
+                      raise SystemExit(f"missing import anchor in {path}: {old!r}")
+                  s = s.replace(old, new, 1)
+              for old, new, count in replacements:
+                  if old not in s:
+                      raise SystemExit(f"missing replacement in {path}: {old[:80]!r}")
+                  s = s.replace(old, new, count)
+              p.write_text(s)
+
+          edit("src/key/mod.rs", [
+              ("        let mut out = Vec::new();", "        let mut out = Zeroizing::new(Vec::new());", 1),
+              ("        Ok(out)\n    }\n\n    /// Returns true if the database key", "        Ok(std::mem::take(&mut *out))\n    }\n\n    /// Returns true if the database key", 1),
+          ])
+
+          edit("src/crypt/kdf.rs", [
+              ("        let key = argon2::hash_raw(composite_key, &self.salt, &config)?;", "        let key = Zeroizing::new(argon2::hash_raw(composite_key, &self.salt, &config)?);", 1),
+          ], ("use sha2::{Digest, Sha256};", "use sha2::{Digest, Sha256};\nuse zeroize::Zeroizing;"))
+
+          edit("src/crypt/ciphers.rs", [
+              ("    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptographyError>;", "    fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptographyError>;", 1),
+              ("pub(crate) struct AES256Cipher {", "#[derive(Zeroize, ZeroizeOnDrop)]\npub(crate) struct AES256Cipher {", 1),
+              ("pub(crate) struct TwofishCipher {", "#[derive(Zeroize, ZeroizeOnDrop)]\npub(crate) struct TwofishCipher {", 1),
+              ("fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptographyError> {", "fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptographyError> {", 5),
+              ("        let mut out = vec![0; ciphertext.len()];", "        let mut out = Zeroizing::new(vec![0; ciphertext.len()]);", 1),
+              ("        let mut buf = ciphertext.to_vec();", "        let mut buf = Zeroizing::new(ciphertext.to_vec());", 1),
+              ("        let mut buffer = Vec::from(ciphertext);", "        let mut buffer = Zeroizing::new(Vec::from(ciphertext));", 2),
+              ("        Ok(Vec::from(ciphertext))", "        Ok(Zeroizing::new(Vec::from(ciphertext)))", 1),
+          ], ("use crate::crypt::{calculate_sha256, CryptographyError};", "use crate::crypt::{calculate_sha256, CryptographyError};\nuse zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};"))
+
+          edit("src/format/hmac_block_stream.rs", [
+              ("pub(crate) fn get_hmac_block_key(block_index: u64, key: &GenericArray<u8, U64>) -> GenericArray<u8, U64> {\n    let mut buf = [0u8; 8];\n    LittleEndian::write_u64(&mut buf, block_index);\n    crate::crypt::calculate_sha512(&[&buf, key])\n}", "pub(crate) fn get_hmac_block_key(block_index: u64, key: &GenericArray<u8, U64>) -> Zeroizing<Vec<u8>> {\n    let mut buf = [0u8; 8];\n    LittleEndian::write_u64(&mut buf, block_index);\n    Zeroizing::new(crate::crypt::calculate_sha512(&[&buf, key]).to_vec())\n}", 1),
+          ], ("use thiserror::Error;", "use thiserror::Error;\nuse zeroize::Zeroizing;"))
+
+          edit("src/format/kdbx4/parse.rs", [
+              ("    let (config, header_attachments, mut inner_decryptor, xml) =\n        decrypt_kdbx4_with_limits(data, db_key, limits)?;", "    let (config, header_attachments, mut inner_decryptor, xml) =\n        decrypt_kdbx4_with_limits(data, db_key, limits)?;\n    let xml = Zeroizing::new(xml);", 1),
+              ("    let key_elements = db_key.get_key_elements()?;", "    let key_elements = Zeroizing::new(db_key.get_key_elements()?);", 1),
+              ("    let composite_key = crypt::calculate_sha256(&key_elements);", "    let composite_key = Zeroizing::new(crypt::calculate_sha256(&key_elements));", 1),
+              ("    let transformed_key = outer_header\n        .kdf_config\n        .get_kdf_seeded(&outer_header.kdf_seed)\n        .transform_key(&composite_key)?;", "    let transformed_key = Zeroizing::new(\n        outer_header\n            .kdf_config\n            .get_kdf_seeded(&outer_header.kdf_seed)\n            .transform_key(&composite_key)?,\n    );", 1),
+              ("    let master_key = crypt::calculate_sha256(&[outer_header.master_seed.as_ref(), &transformed_key]);", "    let master_key = Zeroizing::new(crypt::calculate_sha256(&[\n        outer_header.master_seed.as_ref(),\n        &transformed_key,\n    ]));", 1),
+              ("    let hmac_key = crypt::calculate_sha512(&[", "    let hmac_key = Zeroizing::new(crypt::calculate_sha512(&[", 1),
+              ("        &hmac_block_stream::HMAC_KEY_END,\n    ]);", "        &hmac_block_stream::HMAC_KEY_END,\n    ]));", 1),
+              ("        Ok(payload) => payload,", "        Ok(payload) => Zeroizing::new(payload),", 1),
+          ], ("use thiserror::Error;", "use thiserror::Error;\nuse zeroize::Zeroizing;"))
+
+          edit("src/format/kdbx3.rs", [
+              ("    let (config, mut inner_decryptor, xml) = decrypt_kdbx3_with_limits(data, db_key, limits)?;", "    let (config, mut inner_decryptor, xml) = decrypt_kdbx3_with_limits(data, db_key, limits)?;\n    let xml = Zeroizing::new(xml);", 1),
+              ("    let key_elements = db_key.get_key_elements()?;", "    let key_elements = Zeroizing::new(db_key.get_key_elements()?);", 1),
+              ("    let composite_key = calculate_sha256(&key_elements);", "    let composite_key = Zeroizing::new(calculate_sha256(&key_elements));", 1),
+              ("    let transformed_key = config\n        .kdf_config\n        .get_kdf_seeded(&header.transform_seed)\n        .transform_key(&composite_key)?;", "    let transformed_key = Zeroizing::new(\n        config\n            .kdf_config\n            .get_kdf_seeded(&header.transform_seed)\n            .transform_key(&composite_key)?,\n    );", 1),
+              ("    let master_key = calculate_sha256(&[header.master_seed.as_ref(), &transformed_key]);", "    let master_key = Zeroizing::new(calculate_sha256(&[\n        header.master_seed.as_ref(),\n        &transformed_key,\n    ]));", 1),
+              ("    let mut buf = Vec::new();", "    let mut buf = Zeroizing::new(Vec::new());", 1),
+          ], ("use thiserror::Error;", "use thiserror::Error;\nuse zeroize::Zeroizing;"))
+          PY
+
+          cargo fmt --all
+          git rm .github/workflows/fortress-derived-zeroization-temp.yml
+          git add src/key/mod.rs src/crypt/kdf.rs src/crypt/ciphers.rs src/format/hmac_block_stream.rs src/format/kdbx4/parse.rs src/format/kdbx3.rs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: zeroize derived keys and plaintext buffers"
+          git push origin HEAD:fortress/derived-key-zeroization
