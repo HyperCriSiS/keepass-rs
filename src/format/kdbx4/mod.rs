@@ -217,6 +217,7 @@ mod kdbx4_tests {
         let root = decrypted_db.root();
 
         let entry = root.entry_by_name("Demo entry").unwrap();
-        assert_eq!(entry.get_password(), Some("secret"));
+
+        assert_eq!(entry.attachments().count(), 2);
     }
 }
