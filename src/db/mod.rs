@@ -115,12 +115,8 @@ mod database_tests {
             ..DatabaseOpenLimits::UNLIMITED
         };
 
-        let error = Database::open_with_limits(
-            &mut file,
-            DatabaseKey::new().with_password("demopass"),
-            limits,
-        )
-        .unwrap_err();
+        let error = Database::open_with_limits(&mut file, DatabaseKey::new().with_password("demopass"), limits)
+            .unwrap_err();
 
         assert!(matches!(
             error,
@@ -138,18 +134,14 @@ mod database_tests {
             ..DatabaseOpenLimits::UNLIMITED
         };
 
-        let error = Database::parse_with_limits(
-            &data,
-            DatabaseKey::new().with_password("demopass"),
-            limits,
-        )
-        .unwrap_err();
+        let error = Database::parse_with_limits(&data, DatabaseKey::new().with_password("demopass"), limits)
+            .unwrap_err();
 
         assert!(matches!(
             error,
-            DatabaseOpenError::ResourceLimit(
-                DatabaseResourceLimitError::DecompressedPayloadBytes { limit: 32 }
-            )
+            DatabaseOpenError::ResourceLimit(DatabaseResourceLimitError::DecompressedPayloadBytes {
+                limit: 32
+            })
         ));
 
         Ok(())

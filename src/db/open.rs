@@ -49,17 +49,33 @@ impl Default for DatabaseOpenLimits {
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DatabaseResourceLimitError {
+    /// The encoded database input exceeded the configured byte limit.
     #[error("database input exceeds configured limit of {limit} bytes")]
-    InputBytes { limit: usize },
+    InputBytes {
+        /// Maximum permitted encoded input size in bytes.
+        limit: usize,
+    },
 
+    /// The decompressed KDBX payload exceeded the configured byte limit.
     #[error("decompressed database payload exceeds configured limit of {limit} bytes")]
-    DecompressedPayloadBytes { limit: usize },
+    DecompressedPayloadBytes {
+        /// Maximum permitted decompressed KDBX payload size in bytes.
+        limit: usize,
+    },
 
+    /// A decoded/decompressed binary attachment exceeded the configured byte limit.
     #[error("decompressed binary exceeds configured limit of {limit} bytes")]
-    DecompressedBinaryBytes { limit: usize },
+    DecompressedBinaryBytes {
+        /// Maximum permitted size of one decoded/decompressed binary attachment in bytes.
+        limit: usize,
+    },
 
+    /// Aggregate decoded/decompressed binary data exceeded the configured byte limit.
     #[error("total decompressed binary data exceeds configured limit of {limit} bytes")]
-    TotalDecompressedBinaryBytes { limit: usize },
+    TotalDecompressedBinaryBytes {
+        /// Maximum permitted aggregate decoded/decompressed binary size in bytes.
+        limit: usize,
+    },
 }
 
 fn read_to_end_with_limit(

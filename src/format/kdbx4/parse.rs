@@ -6,10 +6,12 @@ use byteorder::{ByteOrder, LittleEndian};
 use thiserror::Error;
 
 use crate::{
+    compression::DecompressionError,
     config::{CompressionConfig, DatabaseConfig, InnerCipherConfig, KdfConfig, OuterCipherConfig},
     crypt::{self, ciphers::Cipher},
-    compression::DecompressionError,
-    db::{Database, DatabaseFormatError, DatabaseOpenError, DatabaseOpenLimits, DatabaseResourceLimitError, Value},
+    db::{
+        Database, DatabaseFormatError, DatabaseOpenError, DatabaseOpenLimits, DatabaseResourceLimitError, Value,
+    },
     format::{
         hmac_block_stream,
         kdbx4::{

@@ -1,7 +1,7 @@
 use crate::{
+    compression::DecompressionError,
     config::{CompressionConfig, DatabaseConfig, InnerCipherConfig, KdfConfig, OuterCipherConfig},
     crypt::{calculate_sha256, ciphers::Cipher},
-    compression::DecompressionError,
     db::{Database, DatabaseFormatError, DatabaseOpenError, DatabaseOpenLimits, DatabaseResourceLimitError},
     format::DatabaseVersion,
     key::{DatabaseKey, DatabaseKeyError},
@@ -196,12 +196,7 @@ pub(crate) fn parse_kdbx3_with_limits(
     let (config, mut inner_decryptor, xml) = decrypt_kdbx3_with_limits(data, db_key, limits)?;
 
     // Parse XML data blocks
-    let mut db = match crate::format::xml_db::parse_xml_with_limits(
-        &xml,
-        &[],
-        &mut *inner_decryptor,
-        limits,
-    ) {
+    let mut db = match crate::format::xml_db::parse_xml_with_limits(&xml, &[], &mut *inner_decryptor, limits) {
         Ok(db) => db,
         Err(crate::format::xml_db::ParseXmlError::ResourceLimit(error)) => {
             return Err(DatabaseOpenError::ResourceLimit(error));
