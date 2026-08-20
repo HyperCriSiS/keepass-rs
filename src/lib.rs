@@ -8,6 +8,9 @@ pub mod db;
 pub mod error;
 pub(crate) mod format;
 
+#[cfg(feature = "test_fixture_tools")]
+pub mod test_fixture_tools;
+
 mod key;
 
 pub use self::db::Database;

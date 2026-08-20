@@ -28,6 +28,25 @@ pub fn dump_kdbx4(
     db_key: &DatabaseKey,
     writer: &mut dyn Write,
 ) -> Result<(), DatabaseSaveError> {
+    dump_kdbx4_impl(db, db_key, writer, None)
+}
+
+#[cfg(feature = "test_fixture_tools")]
+pub(crate) fn dump_kdbx4_with_raw_xml(
+    db: &Database,
+    db_key: &DatabaseKey,
+    raw_xml: &[u8],
+    writer: &mut dyn Write,
+) -> Result<(), DatabaseSaveError> {
+    dump_kdbx4_impl(db, db_key, writer, Some(raw_xml))
+}
+
+fn dump_kdbx4_impl(
+    db: &Database,
+    db_key: &DatabaseKey,
+    writer: &mut dyn Write,
+    raw_xml_override: Option<&[u8]>,
+) -> Result<(), DatabaseSaveError> {
     if !matches!(db.config.version, DatabaseVersion::KDB4(1)) {
         return Err(DatabaseSaveError::UnsupportedVersion);
     }
@@ -92,8 +111,14 @@ pub fn dump_kdbx4(
         .inner_cipher_config
         .get_cipher(&inner_random_stream_key)?;
 
-    // convert database to XML and header attachments
-    let (xml, attachments) = crate::format::xml_db::to_xml(db, &mut *inner_cipher)?;
+    // Convert the database to XML for normal saves. The raw override exists only
+    // behind the test_fixture_tools feature so downstream compatibility suites can
+    // generate authenticated KDBX containers whose decrypted XML is deliberately
+    // malformed without exposing this capability in production builds.
+    let (xml, attachments) = match raw_xml_override {
+        Some(raw_xml) => (raw_xml.to_vec(), Vec::new()),
+        None => crate::format::xml_db::to_xml(db, &mut *inner_cipher)?,
+    };
 
     // dump inner header into buffer
     let mut payload = Vec::new();

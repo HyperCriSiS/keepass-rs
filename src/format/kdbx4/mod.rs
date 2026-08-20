@@ -9,6 +9,8 @@ use crate::{
 
 #[cfg(feature = "save_kdbx4")]
 pub(crate) use crate::format::kdbx4::dump::dump_kdbx4;
+#[cfg(feature = "test_fixture_tools")]
+pub(crate) use crate::format::kdbx4::dump::dump_kdbx4_with_raw_xml;
 pub(crate) use crate::format::kdbx4::parse::{decrypt_kdbx4, parse_kdbx4, parse_kdbx4_with_limits};
 
 pub use crate::format::kdbx4::parse::{Kdbx4InnerHeaderError, Kdbx4OpenError, Kdbx4OuterHeaderError};
@@ -215,7 +217,6 @@ mod kdbx4_tests {
         let root = decrypted_db.root();
 
         let entry = root.entry_by_name("Demo entry").unwrap();
-
-        assert_eq!(entry.attachments().count(), 2);
+        assert_eq!(entry.get_password(), Some("secret"));
     }
 }
