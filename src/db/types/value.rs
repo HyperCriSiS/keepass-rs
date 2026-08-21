@@ -130,7 +130,7 @@ mod tests {
     fn unprotected_values_are_zeroized_on_drop() {
         let zeroized = Arc::new(AtomicBool::new(false));
         {
-            let _value = Value::unprotected(ZeroizeProbe(Arc::clone(&zeroized)));
+            let _value: Value<ZeroizeProbe> = Value::unprotected(ZeroizeProbe(Arc::clone(&zeroized)));
         }
         assert!(zeroized.load(Ordering::SeqCst));
     }
