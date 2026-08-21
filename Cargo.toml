@@ -144,7 +144,7 @@ required-features = ["utilities"]
 [[bin]]
 # parse and write a KeePass database (to check if all fields are kept)
 name = "kp-rewrite"
-required-features = ["utilities"]
+required-features = ["utilities", "save_kdbx4"]
 
 [[bin]]
 name = "kp-yk-add"
