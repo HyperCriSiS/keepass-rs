@@ -59,8 +59,8 @@ sha2 = "0.11"
 aes = "0.9"
 block-modes = "0.9"
 hmac = "0.13"
-salsa20 = "0.11"
-chacha20 = "0.10"
+salsa20 = { version = "0.11", features = ["zeroize"] }
+chacha20 = { version = "0.10", features = ["zeroize"] }
 cipher = { version = "0.5", features = ["block-padding", "alloc"] }
 twofish = "0.8"
 cbc = "0.2"
@@ -144,7 +144,7 @@ required-features = ["utilities"]
 [[bin]]
 # parse and write a KeePass database (to check if all fields are kept)
 name = "kp-rewrite"
-required-features = ["utilities", "save_kdbx4"]
+required-features = ["utilities"]
 
 [[bin]]
 name = "kp-yk-add"
