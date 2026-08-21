@@ -4,6 +4,7 @@ use aes::Aes256;
 use cipher::{BlockCipherEncrypt, KeyInit};
 use hybrid_array::{typenum::U32, Array as GenericArray};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use super::CryptographyError;
 
@@ -84,7 +85,7 @@ impl Kdf for Argon2Kdf {
             version: self.version,
         };
 
-        let key = argon2::hash_raw(composite_key, &self.salt, &config)?;
+        let key = Zeroizing::new(argon2::hash_raw(composite_key, &self.salt, &config)?);
 
         key.as_slice()
             .try_into()

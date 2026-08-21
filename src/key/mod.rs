@@ -219,7 +219,7 @@ impl DatabaseKey {
     }
 
     pub(crate) fn get_key_elements(&self) -> Result<KeyElements, DatabaseKeyError> {
-        let mut out = Vec::new();
+        let mut out = Zeroizing::new(Vec::new());
 
         if let Some(p) = &self.password {
             out.push(calculate_sha256(&[p.as_bytes()]).to_vec());
@@ -242,7 +242,7 @@ impl DatabaseKey {
             ));
         }
 
-        Ok(out)
+        Ok(std::mem::take(&mut *out))
     }
 
     /// Returns true if the database key is not associated with any key component.
