@@ -445,7 +445,7 @@ pub enum Kdbx4InnerHeaderError {
     Incomplete(&'static str),
 
     /// The file ended unexpectedly while parsing the inner header
-    #[error("Unexpected end of file")]
+    #[error("Unexpected end of file while parsing inner header")]
     UnexpectedEof,
 }
 
