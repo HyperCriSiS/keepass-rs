@@ -257,7 +257,7 @@ pub(crate) fn decrypt_kdbx3_with_limits(
     // derive master key from composite key, transform_seed, transform_rounds and master_seed
     let key_elements = Zeroizing::new(db_key.get_key_elements()?);
     let key_elements: Vec<&[u8]> = key_elements.iter().map(|v| &v[..]).collect();
-    let composite_key = Zeroizing::new(calculate_sha256(&key_elements).as_slice().to_vec());
+    let composite_key = calculate_sha256(&key_elements);
 
     // transform the key
     let transformed_key = Zeroizing::new(
