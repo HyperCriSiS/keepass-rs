@@ -9,6 +9,7 @@ use crate::{
 
 use byteorder::{ByteOrder, LittleEndian};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use std::convert::TryFrom;
 
@@ -194,6 +195,7 @@ pub(crate) fn parse_kdbx3_with_limits(
     limits: DatabaseOpenLimits,
 ) -> Result<Database, DatabaseOpenError> {
     let (config, mut inner_decryptor, xml) = decrypt_kdbx3_with_limits(data, db_key, limits)?;
+    let xml = Zeroizing::new(xml);
 
     // Parse XML data blocks
     let mut db = match crate::format::xml_db::parse_xml_with_limits(&xml, &[], &mut *inner_decryptor, limits) {
@@ -232,7 +234,8 @@ pub(crate) fn decrypt_kdbx3_with_limits(
     let header = parse_outer_header(data)
         .map_err(|e| DatabaseOpenError::Format(DatabaseFormatError::Kdbx3(Kdbx3OpenError::OuterHeader(e))))?;
 
-    let inner_decryptor = header.inner_cipher.get_cipher(&header.protected_stream_key)?;
+    let protected_stream_key = Zeroizing::new(header.protected_stream_key);
+    let inner_decryptor = header.inner_cipher.get_cipher(&protected_stream_key)?;
 
     let config = DatabaseConfig {
         version,
@@ -252,23 +255,33 @@ pub(crate) fn decrypt_kdbx3_with_limits(
     let payload_encrypted = data.get(pos..).ok_or(DatabaseOpenError::UnexpectedEof)?;
 
     // derive master key from composite key, transform_seed, transform_rounds and master_seed
-    let key_elements = db_key.get_key_elements()?;
+    let key_elements = Zeroizing::new(db_key.get_key_elements()?);
     let key_elements: Vec<&[u8]> = key_elements.iter().map(|v| &v[..]).collect();
     let composite_key = calculate_sha256(&key_elements);
 
     // transform the key
-    let transformed_key = config
-        .kdf_config
-        .get_kdf_seeded(&header.transform_seed)
-        .transform_key(&composite_key)?;
+    let transformed_key = Zeroizing::new(
+        config
+            .kdf_config
+            .get_kdf_seeded(&header.transform_seed)
+            .transform_key(&composite_key)?
+            .as_slice()
+            .to_vec(),
+    );
 
-    let master_key = calculate_sha256(&[header.master_seed.as_ref(), &transformed_key]);
+    let master_key = Zeroizing::new(
+        calculate_sha256(&[header.master_seed.as_ref(), &transformed_key])
+            .as_slice()
+            .to_vec(),
+    );
 
     // Decrypt payload
-    let payload = config
-        .outer_cipher_config
-        .get_cipher(&master_key, header.outer_iv.as_ref())?
-        .decrypt(payload_encrypted)?;
+    let payload = Zeroizing::new(
+        config
+            .outer_cipher_config
+            .get_cipher(&master_key, header.outer_iv.as_ref())?
+            .decrypt(payload_encrypted)?,
+    );
 
     // Check if we decrypted correctly
     let payload_start = payload
@@ -278,7 +291,7 @@ pub(crate) fn decrypt_kdbx3_with_limits(
         return Err(DatabaseKeyError::IncorrectKey.into());
     }
 
-    let mut buf = Vec::new();
+    let mut buf = Zeroizing::new(Vec::new());
 
     pos = 32;
     let mut block_index = 0;
@@ -339,6 +352,9 @@ pub(crate) fn decrypt_kdbx3_with_limits(
         }
     };
 
+    // `decrypt_kdbx3*` is also used by the explicit Database::get_xml diagnostic path, whose
+    // caller intentionally owns plaintext. The normal parse path immediately wraps this Vec in a
+    // `Zeroizing` owner above.
     Ok((config, inner_decryptor, xml))
 }
 

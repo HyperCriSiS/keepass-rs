@@ -4,6 +4,7 @@ use std::convert::{TryFrom, TryInto};
 
 use byteorder::{ByteOrder, LittleEndian};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use crate::{
     compression::DecompressionError,
@@ -40,6 +41,7 @@ pub(crate) fn parse_kdbx4_with_limits(
 ) -> Result<Database, DatabaseOpenError> {
     let (config, header_attachments, mut inner_decryptor, xml) =
         decrypt_kdbx4_with_limits(data, db_key, limits)?;
+    let xml = Zeroizing::new(xml);
 
     let mut db = match crate::format::xml_db::parse_xml_with_limits(
         &xml,
@@ -115,21 +117,33 @@ pub(crate) fn decrypt_kdbx4_with_limits(
     let db_key = db_key.clone().perform_challenge(&outer_header.kdf_seed)?;
 
     // derive master key from composite key, transform_seed, transform_rounds and master_seed
-    let key_elements = db_key.get_key_elements()?;
+    let key_elements = Zeroizing::new(db_key.get_key_elements()?);
     let key_elements: Vec<&[u8]> = key_elements.iter().map(|v| &v[..]).collect();
     let composite_key = crypt::calculate_sha256(&key_elements);
-    let transformed_key = outer_header
-        .kdf_config
-        .get_kdf_seeded(&outer_header.kdf_seed)
-        .transform_key(&composite_key)?;
-    let master_key = crypt::calculate_sha256(&[outer_header.master_seed.as_ref(), &transformed_key]);
+    let transformed_key = Zeroizing::new(
+        outer_header
+            .kdf_config
+            .get_kdf_seeded(&outer_header.kdf_seed)
+            .transform_key(&composite_key)?
+            .as_slice()
+            .to_vec(),
+    );
+    let master_key = Zeroizing::new(
+        crypt::calculate_sha256(&[outer_header.master_seed.as_ref(), &transformed_key])
+            .as_slice()
+            .to_vec(),
+    );
 
     // verify credentials
-    let hmac_key = crypt::calculate_sha512(&[
-        &outer_header.master_seed,
-        &transformed_key,
-        &hmac_block_stream::HMAC_KEY_END,
-    ]);
+    let hmac_key = Zeroizing::new(
+        crypt::calculate_sha512(&[
+            &outer_header.master_seed,
+            &transformed_key,
+            &hmac_block_stream::HMAC_KEY_END,
+        ])
+        .as_slice()
+        .to_vec(),
+    );
     let header_hmac_key = hmac_block_stream::get_hmac_block_key(u64::MAX, &hmac_key);
 
     #[allow(clippy::expect_used)] // HMAC block key is always correctly sized, so this can't fail
@@ -146,17 +160,19 @@ pub(crate) fn decrypt_kdbx4_with_limits(
         .map_err(|e| DatabaseOpenError::Format(DatabaseFormatError::Kdbx4(Kdbx4OpenError::BlockStream(e))))?;
 
     // Decrypt and decompress encrypted payload
-    let payload_compressed = outer_header
-        .outer_cipher_config
-        .get_cipher(&master_key, &outer_header.outer_iv)?
-        .decrypt(&payload_encrypted)?;
+    let payload_compressed = Zeroizing::new(
+        outer_header
+            .outer_cipher_config
+            .get_cipher(&master_key, &outer_header.outer_iv)?
+            .decrypt(&payload_encrypted)?,
+    );
 
     let payload = match outer_header
         .compression_config
         .get_compression()
         .decompress_with_limit(&payload_compressed, limits.max_decompressed_payload_bytes)
     {
-        Ok(payload) => payload,
+        Ok(payload) => Zeroizing::new(payload),
         Err(DecompressionError::Io(error)) => return Err(DatabaseOpenError::Io(error)),
         Err(DecompressionError::OutputLimitExceeded { .. }) => {
             return Err(DatabaseResourceLimitError::DecompressedPayloadBytes {
@@ -175,10 +191,12 @@ pub(crate) fn decrypt_kdbx4_with_limits(
         .get(body_start..)
         .ok_or(DatabaseOpenError::UnexpectedEof)?;
 
-    // initialize the inner decryptor
+    // initialize the inner decryptor; wipe the raw inner stream key after the cipher takes ownership
+    // of the state it needs.
+    let inner_random_stream_key = Zeroizing::new(inner_header.inner_random_stream_key);
     let inner_decryptor = inner_header
         .inner_random_stream
-        .get_cipher(&inner_header.inner_random_stream_key)?;
+        .get_cipher(&inner_random_stream_key)?;
 
     let config = DatabaseConfig {
         version,
@@ -189,6 +207,9 @@ pub(crate) fn decrypt_kdbx4_with_limits(
         public_custom_data: outer_header.public_custom_data,
     };
 
+    // `decrypt_kdbx4*` is also used by the explicit Database::get_xml diagnostic path, whose
+    // caller intentionally owns plaintext. The normal parse path immediately wraps this Vec in a
+    // `Zeroizing` owner above.
     Ok((config, header_attachments, inner_decryptor, xml.to_vec()))
 }
 

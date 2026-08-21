@@ -1,15 +1,12 @@
 use byteorder::{ByteOrder, LittleEndian};
 use hex_literal::hex;
-use hybrid_array::{typenum::U64, Array as GenericArray};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 pub const HMAC_KEY_END: [u8; 1] = hex!("01");
 
 /// Read from a HMAC block stream into a raw buffer
-pub(crate) fn read_hmac_block_stream(
-    data: &[u8],
-    key: &GenericArray<u8, U64>,
-) -> Result<Vec<u8>, BlockStreamError> {
+pub(crate) fn read_hmac_block_stream(data: &[u8], key: &[u8]) -> Result<Vec<u8>, BlockStreamError> {
     // keepassxc src/streams/HmacBlockStream.cpp
 
     let mut out = Vec::new();
@@ -54,7 +51,7 @@ pub(crate) fn read_hmac_block_stream(
 
 #[cfg(feature = "save_kdbx4")]
 /// Write a raw buffer as a HMAC block stream
-pub(crate) fn write_hmac_block_stream(data: &[u8], key: &GenericArray<u8, U64>) -> Vec<u8> {
+pub(crate) fn write_hmac_block_stream(data: &[u8], key: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
 
     let mut pos = 0;
@@ -103,13 +100,13 @@ pub(crate) fn write_hmac_block_stream(data: &[u8], key: &GenericArray<u8, U64>) 
     out
 }
 
-pub(crate) fn get_hmac_block_key(block_index: u64, key: &GenericArray<u8, U64>) -> GenericArray<u8, U64> {
+pub(crate) fn get_hmac_block_key(block_index: u64, key: &[u8]) -> Zeroizing<Vec<u8>> {
     let mut buf = [0u8; 8];
     LittleEndian::write_u64(&mut buf, block_index);
-    crate::crypt::calculate_sha512(&[&buf, key])
+    Zeroizing::new(crate::crypt::calculate_sha512(&[&buf, key]).to_vec())
 }
 
-/// Errors reading from the HMAC block stream
+/// Errors reading from a HMAC block stream
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum BlockStreamError {
