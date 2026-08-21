@@ -1,0 +1,43 @@
+name: Fortress value zeroize test type fix
+
+on:
+  push:
+    branches:
+      - fortress/persistent-value-zeroization
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fortress/persistent-value-zeroization
+      - name: Make zeroize probe type explicit
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('src/db/types/value.rs')
+          s = p.read_text()
+          old = 'let _value = Value::unprotected(ZeroizeProbe(Arc::clone(&zeroized)));'
+          new = 'let _value: Value<ZeroizeProbe> = Value::unprotected(ZeroizeProbe(Arc::clone(&zeroized)));'
+          if old not in s:
+              raise SystemExit('expected probe line not found')
+          p.write_text(s.replace(old, new, 1))
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format
+        run: cargo fmt -- src/db/types/value.rs
+      - name: Remove helper
+        run: rm .github/workflows/fortress-value-test-type-fix-temp.yml
+      - name: Commit
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/db/types/value.rs .github/workflows/fortress-value-test-type-fix-temp.yml
+          git commit -m "test: make zeroize probe type explicit"
+          git push origin HEAD:fortress/persistent-value-zeroization
