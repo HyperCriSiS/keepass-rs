@@ -257,20 +257,23 @@ pub(crate) fn decrypt_kdbx3_with_limits(
     // derive master key from composite key, transform_seed, transform_rounds and master_seed
     let key_elements = Zeroizing::new(db_key.get_key_elements()?);
     let key_elements: Vec<&[u8]> = key_elements.iter().map(|v| &v[..]).collect();
-    let composite_key = Zeroizing::new(calculate_sha256(&key_elements));
+    let composite_key = Zeroizing::new(calculate_sha256(&key_elements).as_slice().to_vec());
 
     // transform the key
     let transformed_key = Zeroizing::new(
         config
             .kdf_config
             .get_kdf_seeded(&header.transform_seed)
-            .transform_key(&composite_key)?,
+            .transform_key(&composite_key)?
+            .as_slice()
+            .to_vec(),
     );
 
-    let master_key = Zeroizing::new(calculate_sha256(&[
-        header.master_seed.as_ref(),
-        &transformed_key,
-    ]));
+    let master_key = Zeroizing::new(
+        calculate_sha256(&[header.master_seed.as_ref(), &transformed_key])
+            .as_slice()
+            .to_vec(),
+    );
 
     // Decrypt payload
     let payload = Zeroizing::new(

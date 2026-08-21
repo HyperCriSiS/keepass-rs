@@ -119,24 +119,31 @@ pub(crate) fn decrypt_kdbx4_with_limits(
     // derive master key from composite key, transform_seed, transform_rounds and master_seed
     let key_elements = Zeroizing::new(db_key.get_key_elements()?);
     let key_elements: Vec<&[u8]> = key_elements.iter().map(|v| &v[..]).collect();
-    let composite_key = Zeroizing::new(crypt::calculate_sha256(&key_elements));
+    let composite_key = Zeroizing::new(crypt::calculate_sha256(&key_elements).as_slice().to_vec());
     let transformed_key = Zeroizing::new(
         outer_header
             .kdf_config
             .get_kdf_seeded(&outer_header.kdf_seed)
-            .transform_key(&composite_key)?,
+            .transform_key(&composite_key)?
+            .as_slice()
+            .to_vec(),
     );
-    let master_key = Zeroizing::new(crypt::calculate_sha256(&[
-        outer_header.master_seed.as_ref(),
-        &transformed_key,
-    ]));
+    let master_key = Zeroizing::new(
+        crypt::calculate_sha256(&[outer_header.master_seed.as_ref(), &transformed_key])
+            .as_slice()
+            .to_vec(),
+    );
 
     // verify credentials
-    let hmac_key = Zeroizing::new(crypt::calculate_sha512(&[
-        &outer_header.master_seed,
-        &transformed_key,
-        &hmac_block_stream::HMAC_KEY_END,
-    ]));
+    let hmac_key = Zeroizing::new(
+        crypt::calculate_sha512(&[
+            &outer_header.master_seed,
+            &transformed_key,
+            &hmac_block_stream::HMAC_KEY_END,
+        ])
+        .as_slice()
+        .to_vec(),
+    );
     let header_hmac_key = hmac_block_stream::get_hmac_block_key(u64::MAX, &hmac_key);
 
     #[allow(clippy::expect_used)] // HMAC block key is always correctly sized, so this can't fail
