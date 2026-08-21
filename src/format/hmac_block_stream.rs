@@ -6,10 +6,7 @@ use zeroize::Zeroizing;
 pub const HMAC_KEY_END: [u8; 1] = hex!("01");
 
 /// Read from a HMAC block stream into a raw buffer
-pub(crate) fn read_hmac_block_stream(
-    data: &[u8],
-    key: &[u8],
-) -> Result<Vec<u8>, BlockStreamError> {
+pub(crate) fn read_hmac_block_stream(data: &[u8], key: &[u8]) -> Result<Vec<u8>, BlockStreamError> {
     // keepassxc src/streams/HmacBlockStream.cpp
 
     let mut out = Vec::new();
